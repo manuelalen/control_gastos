@@ -52,6 +52,52 @@ def ym_to_date(ym: str) -> date:
 def date_to_ym(d: date) -> str:
     return d.strftime("%Y-%m")
 
+def eur(x: float) -> str:
+    # Formato español simple: 1.234,56 €
+    s = f"{x:,.2f}"
+    s = s.replace(",", "X").replace(".", ",").replace("X", ".")
+    return f"{s} €"
+
+# ----------------------------
+# KPIs (ARRIBA DEL TODO, antes del formulario)
+# ----------------------------
+st.subheader("💰 Ahorro acumulado")
+
+df_kpi = load_monthly_view()
+
+if df_kpi.empty:
+    st.metric("Total ahorro (todos)", eur(0.0))
+    st.info("Aún no hay datos para calcular ahorros acumulados.")
+else:
+    df_kpi["ahorro"] = pd.to_numeric(df_kpi["ahorro"], errors="coerce").fillna(0)
+
+    total_ahorro = float(df_kpi["ahorro"].sum())
+    st.metric("Total ahorro (todos)", eur(total_ahorro))
+
+    df_ahorro_user = (
+        df_kpi.groupby(["full_name", "user_id"], as_index=False)["ahorro"]
+        .sum()
+        .sort_values("ahorro", ascending=False)
+    )
+
+    # Si hay pocos usuarios, muéstralos como tarjetas arriba
+    if len(df_ahorro_user) <= 6:
+        cols = st.columns(len(df_ahorro_user))
+        for i, row in enumerate(df_ahorro_user.itertuples(index=False)):
+            with cols[i]:
+                st.metric(row.full_name, eur(float(row.ahorro)))
+
+    # Tabla con el acumulado por usuario
+    st.dataframe(
+        df_ahorro_user[["full_name", "ahorro"]].rename(
+            columns={"full_name": "Usuario", "ahorro": "Ahorro acumulado (€)"}
+        ),
+        use_container_width=True,
+        hide_index=True,
+    )
+
+st.divider()
+
 # ----------------------------
 # FORMULARIO (ARRIBA)
 # ----------------------------
@@ -72,11 +118,32 @@ with st.form("insert_form", clear_on_submit=True):
         source = st.selectbox("Tipo", SOURCES, key="source_form")
     with c3:
         today = date.today()
-        year = st.number_input("Año", min_value=2000, max_value=2100, value=today.year, step=1, key="year_form")
+        year = st.number_input(
+            "Año",
+            min_value=2000,
+            max_value=2100,
+            value=today.year,
+            step=1,
+            key="year_form",
+        )
     with c4:
-        month = st.number_input("Mes", min_value=1, max_value=12, value=today.month, step=1, key="month_form")
+        month = st.number_input(
+            "Mes",
+            min_value=1,
+            max_value=12,
+            value=today.month,
+            step=1,
+            key="month_form",
+        )
 
-    amount = st.number_input("Cantidad (€)", min_value=0.00, value=0.00, step=1.00, format="%.2f", key="amount_form")
+    amount = st.number_input(
+        "Cantidad (€)",
+        min_value=0.00,
+        value=0.00,
+        step=1.00,
+        format="%.2f",
+        key="amount_form",
+    )
     submitted = st.form_submit_button("Insertar")
 
 if submitted:
@@ -101,7 +168,6 @@ if submitted:
                 st.error(f"Error insertando: {res.error}")
             else:
                 st.success("Insertado correctamente ✅")
-                # refrescar caches
                 st.cache_data.clear()
         except Exception as e:
             st.exception(e)
@@ -119,7 +185,6 @@ if df.empty:
     st.info("Aún no hay datos para construir la vista mensual.")
     st.stop()
 
-# Convertir year_month a date para filtrar
 df["ym_date"] = df["year_month"].apply(ym_to_date)
 
 # Sidebar slicers (izquierda)
@@ -134,7 +199,6 @@ max_d = df["ym_date"].max()
 date_from = st.sidebar.date_input("Fecha origen", value=min_d, min_value=min_d, max_value=max_d)
 date_to = st.sidebar.date_input("Fecha destino", value=max_d, min_value=min_d, max_value=max_d)
 
-# Normalizar si el usuario pone al revés
 if date_from > date_to:
     date_from, date_to = date_to, date_from
 
@@ -145,7 +209,6 @@ metric_map = {
 }
 metric_col = metric_map[metric_label]
 
-# Filtrar
 df_f = df[
     (df["full_name"] == user_filter)
     & (df["ym_date"] >= date_from)
@@ -154,8 +217,11 @@ df_f = df[
 
 df_f = df_f.sort_values(["year", "month"])
 
-# --------- LINE CHART (matplotlib)
-st.markdown(f"**Usuario:** {user_filter}  \n**Métrica:** {metric_label}  \n**Rango:** {date_to_ym(date_from)} → {date_to_ym(date_to)}")
+st.markdown(
+    f"**Usuario:** {user_filter}  \n"
+    f"**Métrica:** {metric_label}  \n"
+    f"**Rango:** {date_to_ym(date_from)} → {date_to_ym(date_to)}"
+)
 
 if df_f.empty:
     st.warning("No hay datos en ese rango.")
@@ -168,9 +234,7 @@ else:
     plt.tight_layout()
     st.pyplot(fig)
 
-# --------- TABLE (vista filtrada)
 st.subheader("📋 Tabla (vista mensual)")
 cols_show = ["year_month", "ingreso", "gastos", "ahorro"]
-# Formateo simple
 df_table = df_f[cols_show].copy()
 st.dataframe(df_table, use_container_width=True)
