@@ -15,7 +15,6 @@ SUPABASE_KEY = st.secrets["SUPABASE_SERVICE_ROLE_KEY"]
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 SCHEMA = "finance"
-
 SOURCES = ["Gasto", "Nómina", "Otros Ingresos"]
 
 # ----------------------------
@@ -42,6 +41,35 @@ def load_monthly_view():
         .order("month", desc=False)
         .execute()
     )
+    rows = getattr(res, "data", None) or []
+    return pd.DataFrame(rows)
+
+@st.cache_data(ttl=30)
+def load_income_entries():
+    """
+    Carga el detalle de inserts desde finance.income_entries.
+    Intenta incluir created_at si existe; si no existe, hace fallback.
+    """
+    # Intento 1: con created_at
+    res = (
+        supabase.schema(SCHEMA)
+        .table("income_entries")
+        .select("id,created_at,user_id,year,month,source,amount")
+        .order("created_at", desc=True)
+        .execute()
+    )
+
+    # Si falla (p.ej. porque no existe created_at), fallback sin created_at
+    if getattr(res, "error", None):
+        res = (
+            supabase.schema(SCHEMA)
+            .table("income_entries")
+            .select("id,user_id,year,month,source,amount")
+            .order("year", desc=True)
+            .order("month", desc=True)
+            .execute()
+        )
+
     rows = getattr(res, "data", None) or []
     return pd.DataFrame(rows)
 
@@ -160,7 +188,7 @@ if submitted:
         try:
             res = (
                 supabase.schema(SCHEMA)
-                .table("income_entries")
+                .table("income_entries")  # <-- aquí se insertan los datos
                 .insert(payload)
                 .execute()
             )
@@ -237,4 +265,111 @@ else:
 st.subheader("📋 Tabla (vista mensual)")
 cols_show = ["year_month", "ingreso", "gastos", "ahorro"]
 df_table = df_f[cols_show].copy()
-st.dataframe(df_table, use_container_width=True)
+st.dataframe(df_table, use_container_width=True, hide_index=True)
+
+# ----------------------------
+# HISTÓRICO (DETALLE DE INSERTS)
+# ----------------------------
+st.divider()
+st.subheader("🧾 Histórico de registros (detalle de inserts)")
+
+df_entries = load_income_entries()
+
+if df_entries.empty:
+    st.info("Aún no hay inserts en finance.income_entries.")
+else:
+    # Enlazar user_id -> full_name
+    df_profiles = pd.DataFrame(profiles)  # ya cargado arriba
+    df_entries = df_entries.merge(df_profiles, on="user_id", how="left")
+
+    # Normalizar numéricos
+    for col in ["year", "month", "amount"]:
+        if col in df_entries.columns:
+            df_entries[col] = pd.to_numeric(df_entries[col], errors="coerce")
+
+    # Construir YYYY-MM
+    df_entries["year_month"] = df_entries.apply(
+        lambda r: f"{int(r['year']):04d}-{int(r['month']):02d}"
+        if pd.notna(r.get("year")) and pd.notna(r.get("month"))
+        else None,
+        axis=1,
+    )
+
+    # Filtros del histórico (en el panel principal)
+    c1, c2, c3 = st.columns([2, 2, 2])
+    with c1:
+        hist_user = st.selectbox(
+            "Usuario (histórico)",
+            ["(Todos)"] + sorted(df_entries["full_name"].dropna().unique().tolist()),
+            key="hist_user",
+        )
+    with c2:
+        hist_tipo = st.selectbox(
+            "Tipo (histórico)",
+            ["(Todos)"] + sorted(df_entries["source"].dropna().unique().tolist()),
+            key="hist_tipo",
+        )
+    with c3:
+        # si existe created_at, se puede limitar por fecha
+        if "created_at" in df_entries.columns:
+            # parse si viene como string
+            df_entries["created_at_dt"] = pd.to_datetime(df_entries["created_at"], errors="coerce")
+            min_ins = df_entries["created_at_dt"].min()
+            max_ins = df_entries["created_at_dt"].max()
+            if pd.isna(min_ins) or pd.isna(max_ins):
+                date_range = None
+            else:
+                date_range = st.date_input(
+                    "Rango inserción (histórico)",
+                    value=(min_ins.date(), max_ins.date()),
+                    min_value=min_ins.date(),
+                    max_value=max_ins.date(),
+                    key="hist_date_range",
+                )
+        else:
+            date_range = None
+            st.caption("ℹ️ No hay columna created_at en income_entries, no se filtra por fecha de inserción.")
+
+    df_hist = df_entries.copy()
+
+    if hist_user != "(Todos)":
+        df_hist = df_hist[df_hist["full_name"] == hist_user]
+    if hist_tipo != "(Todos)":
+        df_hist = df_hist[df_hist["source"] == hist_tipo]
+
+    if "created_at_dt" in df_hist.columns and date_range is not None:
+        d0, d1 = date_range
+        if d0 > d1:
+            d0, d1 = d1, d0
+        df_hist = df_hist[
+            (df_hist["created_at_dt"].dt.date >= d0) & (df_hist["created_at_dt"].dt.date <= d1)
+        ]
+
+    # Preparar columnas finales
+    df_hist["Cantidad"] = df_hist["amount"].fillna(0).astype(float)
+    df_hist["Cantidad (formato)"] = df_hist["Cantidad"].apply(lambda x: eur(float(x)))
+
+    cols = []
+    if "created_at" in df_hist.columns:
+        cols.append("created_at")
+    cols += ["id", "full_name", "user_id", "year_month", "source", "Cantidad", "Cantidad (formato)"]
+
+    df_hist_out = (
+        df_hist[cols]
+        .rename(
+            columns={
+                "created_at": "Fecha inserción",
+                "id": "ID registro",
+                "full_name": "Usuario",
+                "user_id": "User ID",
+                "year_month": "Mes (YYYY-MM)",
+                "source": "Tipo",
+            }
+        )
+        .sort_values(
+            by=["Fecha inserción"] if "Fecha inserción" in df_hist.columns else ["Mes (YYYY-MM)"],
+            ascending=False,
+        )
+    )
+
+    st.dataframe(df_hist_out, use_container_width=True, hide_index=True)
